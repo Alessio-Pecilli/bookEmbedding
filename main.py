@@ -1,6 +1,6 @@
 """
 =============================================================================
-  main.py  —  Orchestratore (FIXED)
+  main.py  —  Orchestratore (FIXED FINAL)
 =============================================================================
 """
 
@@ -8,8 +8,11 @@ import time
 import pennylane as qml
 from pennylane import numpy as np
 import config
-from graph_manager import get_graph, precompute_crossings, draw_book_embedding
+from graph_manager import get_graph, precompute_crossings
 from qaoa_solver import build_hamiltonian, create_circuit
+
+# === IMPORT CORRETTO DAL NUOVO FILE ===
+from book_viz import draw_book_embedding
 
 def decode_solution(bitstring, edges):
     assignment = {}
@@ -35,18 +38,28 @@ def count_crossings_in_solution(assignment, crossing_pairs):
 
 def main():
     print("\n" + "="*60)
-    print("   QAOA SOLVER — Fixed Order Book Embedding (ADAM + FIXED)")
+    print("   QAOA SOLVER — Fixed Order Book Embedding")
     print("="*60)
     
     nodes, edges, node_order = get_graph()
     crossing_pairs = precompute_crossings(edges, node_order)
+
+    # ─── VISUALIZZAZIONE INIZIALE (PRIMA DI OTTIMIZZARE) ───
+    print("\n[INFO] Visualizzo il grafo iniziale...")
+    print("       (Mostro tutti gli archi sulla Pagina 0 per evidenziare gli incroci)")
+    print("       >>> CHIUDI LA FINESTRA DEL GRAFICO PER CONTINUARE <<<")
+    
+    # Assegnamento finto: tutto su Pagina 0 (Blu)
+    initial_assignment = {i: 0 for i in range(len(edges))}
+    draw_book_embedding(nodes, edges, node_order, initial_assignment)
+
+    # ─── INIZIO PROCESSO QAOA ───
     H, n_qubits = build_hamiltonian(edges, crossing_pairs)
     cost_fn, prob_fn = create_circuit(H, n_qubits, config.LAYERS)
     
     print("\n[FASE 5] INIZIO OTTIMIZZAZIONE")
     
     np.random.seed(config.SEED)
-    # Params shape: (2, LAYERS) -> params[0]=gammas, params[1]=betas
     params = np.random.uniform(0, 2*np.pi, (2, config.LAYERS), requires_grad=True)
     
     optimizer = qml.AdamOptimizer(stepsize=config.LEARNING_RATE)
@@ -57,7 +70,6 @@ def main():
     start_time = time.time()
     
     for step in range(config.STEPS):
-        # L'ottimizzatore ora passa 'params' intero a cost_fn, che ora lo accetta!
         params, energy = optimizer.step_and_cost(cost_fn, params)
         e_val = float(energy)
         
@@ -73,10 +85,8 @@ def main():
 
     print(f"\n[INFO] Best Energy: {best_energy:.4f}")
 
-    # --- CORREZIONE QUI ---
     print("\n[FASE 6] DECODIFICA (Best Params)")
     
-    # Ora passiamo best_params intero, perché prob_fn è stata aggiornata
     probs = prob_fn(best_params) 
     
     best_idx = np.argmax(probs)
@@ -97,11 +107,10 @@ def main():
     
     if crossings == 0 and violated == 0:
         print("\n🎉🎉🎉  SUCCESSO! 0 INCROCI  🎉🎉🎉")
+        print("[INFO] Visualizzo il risultato finale...")
+        draw_book_embedding(nodes, edges, node_order, assignment)
     else:
         print(f"\n⚠️  Fallimento. Incroci: {crossings}, Violazioni: {violated}")
-    if crossings == 0:
-        draw_book_embedding(nodes, edges, node_order, assignment)
 
 if __name__ == "__main__":
     main()
-    
