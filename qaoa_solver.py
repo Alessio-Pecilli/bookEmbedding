@@ -1,6 +1,7 @@
 """
 =============================================================================
   qaoa_solver.py  —  Costruzione dell'Hamiltoniana e Circuito QAOA
+                     (con lightning.qubit + adjoint differentiation)
 =============================================================================
 """
 
@@ -13,71 +14,67 @@ def get_num_qubits(num_edges):
 
 def build_hamiltonian(edges, crossing_pairs):
     num_edges = len(edges)
+    k = config.NUM_PAGES
     n_qubits = get_num_qubits(num_edges)
-    
-    print("\n" + "="*60)
-    print(f"[HAMILTONIANA] Costruzione H su {n_qubits} qubit")
-    print("="*60)
     
     coeffs = []
     obs = []
     
-    # --- H_PAGE ---
-    print("  ... Aggiungendo H_page (Vincolo)")
+    # --- H_PAGE (Vincolo: Un arco su una sola pagina) ---
     for e_idx in range(num_edges):
-        qubits_e = [e_idx * config.NUM_PAGES + p for p in range(config.NUM_PAGES)]
+        qubits_e = [e_idx * k + p for p in range(k)]
         
-        if config.NUM_PAGES == 2:
-            # Caso ottimizzato k=2: H = A * (I + Z0 Z1) / 2
-            q0, q1 = qubits_e
-            # Termine I
-            coeffs.append(config.ALPHA * 0.5)
-            obs.append(qml.Identity(0))
-            # Termine Z0 Z1
-            coeffs.append(config.ALPHA * 0.5)
-            obs.append(qml.prod(qml.PauliZ(q0), qml.PauliZ(q1)))
-        else:
-            # Caso generico (omesso per brevità, usa logica precedente se serve k>2)
-            pass
+        # 1. Costante
+        coeffs.append(config.ALPHA * (1 - 0.75*k + 0.25*k**2))
+        obs.append(qml.Identity(0))
+        
+        # 2. Lineari (Z_p)
+        c_lin = config.ALPHA * (1 - k/2)
+        for q in qubits_e:
+            coeffs.append(c_lin)
+            obs.append(qml.PauliZ(q))
+            
+        # 3. Quadratici (Z_p * Z_q)
+        c_quad = 0.5 * config.ALPHA
+        for i, q1 in enumerate(qubits_e):
+            for q2 in qubits_e[i+1:]:
+                coeffs.append(c_quad)
+                obs.append(qml.prod(qml.PauliZ(q1), qml.PauliZ(q2)))
 
-    # --- H_CROSS ---
-    print("  ... Aggiungendo H_cross (Costo)")
+    # --- H_CROSS (Costo: Minimizzare incroci) ---
     for (e_idx, f_idx) in crossing_pairs:
-        for p in range(config.NUM_PAGES):
-            q_ep = e_idx * config.NUM_PAGES + p
-            q_fp = f_idx * config.NUM_PAGES + p
+        for p in range(k):
+            q_ep = e_idx * k + p
+            q_fp = f_idx * k + p
             
-            # x_ep * x_fp = (I - Z_ep - Z_fp + Z_ep Z_fp) / 4
-            # Termini I, Z_ep, Z_fp, Z_ep Z_fp
-            coeffs.append(config.BETA * 0.25)
-            obs.append(qml.Identity(0))
-            
-            coeffs.append(config.BETA * -0.25)
-            obs.append(qml.PauliZ(q_ep))
-            
-            coeffs.append(config.BETA * -0.25)
-            obs.append(qml.PauliZ(q_fp))
-            
-            coeffs.append(config.BETA * 0.25)
-            obs.append(qml.prod(qml.PauliZ(q_ep), qml.PauliZ(q_fp)))
+            # Espansione di beta * x_ep * x_fp
+            coeffs.extend([config.BETA * 0.25, config.BETA * -0.25, 
+                           config.BETA * -0.25, config.BETA * 0.25])
+            obs.extend([qml.Identity(0), qml.PauliZ(q_ep), 
+                        qml.PauliZ(q_fp), qml.prod(qml.PauliZ(q_ep), qml.PauliZ(q_fp))])
 
-    hamiltonian = qml.Hamiltonian(coeffs, obs)
-    hamiltonian = qml.simplify(hamiltonian)
-    return hamiltonian, n_qubits
+    return qml.simplify(qml.Hamiltonian(coeffs, obs)), n_qubits
 
 def create_circuit(hamiltonian, n_qubits, layers):
     
-    print(f"[CIRCUITO] Creazione QNode (Qubit={n_qubits}, Layers={layers})")
+    
+    try:
+        dev = qml.device("qulacs.simulator", wires=n_qubits)
+        backend = "qulacs.simulator"  
+    except Exception:
+        dev = qml.device("lightning.qubit", wires=n_qubits)
+        backend = "lightning.qubit"
+    print(dev)
+    
+    print(f"[CIRCUITO] Backend={backend}, Qubit={n_qubits}, Layers={layers}")
     
     mixer_h = qml.Hamiltonian(
         [1.0]*n_qubits, 
         [qml.PauliX(i) for i in range(n_qubits)]
     )
     
-    dev = qml.device("default.qubit", wires=n_qubits)
-    
-    # === CORREZIONE QUI: params unico argomento ===
-    @qml.qnode(dev)
+    # ── cost_function: adjoint diff per gradienti veloci ──
+    @qml.qnode(dev, diff_method="best")
     def cost_function(params):
         gammas = params[0]
         betas = params[1]
@@ -91,7 +88,7 @@ def create_circuit(hamiltonian, n_qubits, layers):
             
         return qml.expval(hamiltonian)
 
-    # === CORREZIONE QUI: params unico argomento ===
+    # ── prob_function: non serve gradiente, best_method di default ──
     @qml.qnode(dev)
     def prob_function(params):
         gammas = params[0]

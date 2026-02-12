@@ -58,9 +58,9 @@ def get_graph():
         #   Questi due archi SI INCROCIANO se messi sulla stessa pagina.
         #   La soluzione ottimale: metterli su pagine diverse → 0 incroci.
         # ────────────────────────────────────────────────────────────────
-        nodes = [0, 1, 2, 3]
-        edges = [(0, 2), (1, 3)]
-        node_order = [0, 1, 2, 3]
+        nodes = [0, 1, 2, 3, 4]
+        edges = [(0, 1), (0, 2), (1, 2)]
+        node_order = [0, 1, 2, 3, 4]
 
         print("=" * 60)
         print("[GRAPH] Modalità: DEMO PLANARE")
