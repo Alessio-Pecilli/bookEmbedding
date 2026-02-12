@@ -1,0 +1,6 @@
+pennylane
+qulacs
+networkx
+matplotlib
+numpy
+quimb
