@@ -25,6 +25,19 @@ import itertools
 # Importiamo la configurazione globale
 import config
 
+def assign_edge_weights(edges, low=None, high=None, seed=None):
+    """
+    Assegna un peso a ciascun arco (indice arco -> peso).
+    Distribuzione: Uniform(low, high).
+    """
+    if low is None:
+        low = config.WEIGHT_LOW
+    if high is None:
+        high = config.WEIGHT_HIGH
+
+    rng = random.Random(seed if seed is not None else config.SEED)
+    return {e_idx: rng.uniform(low, high) for e_idx in range(len(edges))}
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # get_graph()
@@ -58,9 +71,11 @@ def get_graph():
         #   Questi due archi SI INCROCIANO se messi sulla stessa pagina.
         #   La soluzione ottimale: metterli su pagine diverse → 0 incroci.
         # ────────────────────────────────────────────────────────────────
-        nodes = [0, 1, 2, 3, 4]
-        edges = [(0, 1), (0, 2), (1, 2)]
-        node_order = [0, 1, 2, 3, 4]
+        # Nota: scegliamo un esempio con incrocio garantito:
+        # e0=(0,2), e1=(1,3) con ordine [0,1,2,3] → 0<1<2<3 ⇒ incrocio se stessa pagina.
+        nodes = [0, 1, 2, 3]
+        edges = [(0, 2), (1, 3)]
+        node_order = [0, 1, 2, 3]
 
         print("=" * 60)
         print("[GRAPH] Modalità: DEMO PLANARE")
@@ -68,7 +83,7 @@ def get_graph():
         print(f"[GRAPH] Archi: {edges}")
         print(f"[GRAPH] Ordine sulla spina: {node_order}")
         print("[GRAPH] Questi archi si incrociano sulla stessa pagina.")
-        print("[GRAPH] Soluzione attesa: archi su pagine DIVERSE → 0 incroci")
+        print("[GRAPH] Soluzione attesa: archi su pagine DIVERSE → costo 0")
         print("=" * 60)
 
     else:
@@ -99,7 +114,7 @@ def get_graph():
 # ─────────────────────────────────────────────────────────────────────────────
 # precompute_crossings(edges, node_order)
 # ─────────────────────────────────────────────────────────────────────────────
-def precompute_crossings(edges, node_order):
+def precompute_crossings(edges, node_order, edge_weights=None):
     """
     Precomputa l'insieme C di coppie di archi che si incrociano secondo
     la condizione geometrica del Book Embedding a ordine fisso:
@@ -119,9 +134,9 @@ def precompute_crossings(edges, node_order):
 
     Ritorna
     -------
-    crossing_pairs : list[tuple[int,int]]
-        Lista di coppie (i, j) dove i,j sono INDICI degli archi in `edges`
-        che si incrociano.  Ogni coppia appare una sola volta (i < j).
+    crossing_pairs : list[tuple[int,int,float]]
+        Lista di triple (i, j, w_ij) dove i,j sono INDICI degli archi in `edges`
+        che si incrociano. w_ij è il peso dell'incrocio (w_i * w_j).
     """
 
     print("\n" + "=" * 60)
@@ -131,6 +146,9 @@ def precompute_crossings(edges, node_order):
     # Mappa nodo → posizione sulla spina del libro.
     # Questo ci permette di confrontare la posizione relativa dei vertici.
     pos = {node: idx for idx, node in enumerate(node_order)}
+
+    if edge_weights is None:
+        edge_weights = assign_edge_weights(edges)
 
     crossing_pairs = []
 
@@ -162,7 +180,8 @@ def precompute_crossings(edges, node_order):
         if crosses:
             print(f"  [✓ INCROCIO]  {edge_e_str} {pos_e_str}  ×  "
                   f"{edge_f_str} {pos_f_str}")
-            crossing_pairs.append((i, j))
+            w = float(edge_weights[i]) * float(edge_weights[j])
+            crossing_pairs.append((i, j, w))
         else:
             print(f"  [  nessuno ]  {edge_e_str} {pos_e_str}  ∥  "
                   f"{edge_f_str} {pos_f_str}")

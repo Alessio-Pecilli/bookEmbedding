@@ -1,362 +1,242 @@
-"""
-=============================================================================
-  main.py  —  Orchestratore con Gradient Clipping, LR Scheduler,
-              Plateau Detection & Crash Recovery
-=============================================================================
-"""
+from __future__ import annotations
 
-import os
-import copy
-import signal
-import time
-import numpy as standard_np                     # numpy puro (per deep copy sicure)
-import pennylane as qml
-from pennylane import numpy as np               # autograd numpy (per ottimizzazione)
+from dataclasses import asdict
+from time import perf_counter
+from typing import Dict, List, Tuple
+
+import numpy as np
+
 import config
-from graph_manager import get_graph, precompute_crossings
-from qaoa_solver import build_hamiltonian, create_circuit
 from book_viz import draw_book_embedding
+from classical_solver import solve_book_embedding_cpsat
+from graph_manager import assign_edge_weights, get_graph, precompute_crossings
+from qaoa_solver import (
+    CostModel,
+    build_cost_model,
+    estimate_energy_from_counts,
+    most_probable_bitstring,
+    sample_qaoa_counts,
+)
 
 
-# ─────────────────────────────────────────────────────────────────
-#  Utility: deep copy parametri staccando da autograd
-# ─────────────────────────────────────────────────────────────────
-def _detach_params(params):
+def decode_solution(bitstring: str, num_edges: int) -> Dict[int, int]:
     """
-    Converte params PennyLane in un array numpy puro (float64),
-    spezzando QUALSIASI legame col grafo autograd.
+    Decode a bitstring into an assignment edge_idx -> page.
+    Encoding: qubit = edge_idx * NUM_PAGES + page
     """
-    return standard_np.array(params, dtype=standard_np.float64, copy=True)
+    assignment: Dict[int, int] = {}
+    k = int(config.NUM_PAGES)
 
-
-def _to_grad_params(raw):
-    """Riconverte un array numpy puro in un tensore PennyLane grad-enabled."""
-    return np.array(raw, requires_grad=True)
-
-
-# ─────────────────────────────────────────────────────────────────
-#  Crash Recovery globale
-# ─────────────────────────────────────────────────────────────────
-_recovery_state = {
-    "best_params": None,      # numpy puro, mai autograd
-    "best_energy": float('inf'),
-    "edges": None,
-    "crossing_pairs": None,
-    "nodes": None,
-    "node_order": None,
-    "n_qubits": None,
-    "prob_fn": None,
-    "interrupted": False,
-}
-
-
-def save_checkpoint():
-    """Salva i migliori parametri trovati su disco."""
-    bp = _recovery_state["best_params"]
-    if bp is not None:
-        path = os.path.join(os.path.dirname(__file__) or ".", config.CHECKPOINT_FILE)
-        standard_np.savez(path,
-                          best_params=bp,
-                          best_energy=standard_np.array(_recovery_state["best_energy"]))
-        print(f"\n  💾 Checkpoint salvato in '{path}'")
-
-
-def _signal_handler(sig, frame):
-    """Gestisce Ctrl+C: salva checkpoint e attiva il flag di interruzione."""
-    print("\n\n⚡ INTERRUZIONE (Ctrl+C) — salvataggio in corso...")
-    save_checkpoint()
-    _recovery_state["interrupted"] = True
-
-
-# ─────────────────────────────────────────────────────────────────
-#  Utilità decodifica
-# ─────────────────────────────────────────────────────────────────
-def decode_solution(bitstring, edges):
-    assignment = {}
-    for e_idx in range(len(edges)):
-        start = e_idx * config.NUM_PAGES
-        end = start + config.NUM_PAGES
+    for e_idx in range(num_edges):
+        start = e_idx * k
+        end = start + k
         bits = bitstring[start:end]
-        active_pages = [p for p in range(config.NUM_PAGES) if bits[p] == 1]
-        if len(active_pages) == 1:
-            assignment[e_idx] = active_pages[0]
-        else:
-            assignment[e_idx] = -1
+        active = [p for p in range(k) if bits[p] == "1"]
+        assignment[e_idx] = active[0] if len(active) == 1 else -1
     return assignment
 
 
-def count_crossings_in_solution(assignment, crossing_pairs):
-    count = 0
-    for (e_idx, f_idx) in crossing_pairs:
-        p_e = assignment.get(e_idx, -1)
-        p_f = assignment.get(f_idx, -1)
-        if p_e >= 0 and p_e == p_f:
-            count += 1
-    return count
+def weighted_crossing_cost(assignment: Dict[int, int], weighted_crossings) -> float:
+    total = 0.0
+    for (e, f, w) in weighted_crossings:
+        pe = assignment.get(int(e), -1)
+        pf = assignment.get(int(f), -1)
+        if pe >= 0 and pe == pf:
+            total += float(w)
+    return float(total)
 
 
-def finalize_results():
+def count_violations(assignment: Dict[int, int]) -> int:
+    return sum(1 for v in assignment.values() if int(v) < 0)
+
+
+def best_decode_with_optional_reverse(bitstring: str, num_edges: int) -> Dict[int, int]:
     """
-    Decodifica e mostra i risultati usando i MIGLIORI parametri trovati.
-    Chiamata sia in caso di completamento normale, sia dopo crash/interrupt.
+    Depending on backend conventions, bit order may be reversed.
+    Try both and pick the one with fewer one-hot violations.
     """
-    bp = _recovery_state["best_params"]
-    be = _recovery_state["best_energy"]
-    edges = _recovery_state["edges"]
-    crossing_pairs = _recovery_state["crossing_pairs"]
-    nodes = _recovery_state["nodes"]
-    node_order = _recovery_state["node_order"]
-    n_qubits = _recovery_state["n_qubits"]
-    prob_fn = _recovery_state["prob_fn"]
-
-    if bp is None or prob_fn is None:
-        print("\n❌ Nessun parametro valido trovato. Impossibile decodificare.")
-        return
-
-    print(f"\n{'='*60}")
-    print(f"  DECODIFICA FINALE (Best Energy: {be:.4f})")
-    print(f"{'='*60}")
-
-    try:
-        bp_grad = _to_grad_params(bp)
-        probs = prob_fn(bp_grad)
-        best_idx = standard_np.argmax(probs)
-        best_bs = [int(b) for b in format(best_idx, f'0{n_qubits}b')]
-
-        print(f"  Stato vincente: |{''.join(map(str, best_bs))}>")
-
-        assignment = decode_solution(best_bs, edges)
-        crossings = count_crossings_in_solution(assignment, crossing_pairs)
-        violated = sum(1 for v in assignment.values() if v == -1)
-
-        print("-" * 40)
-        for e, p in assignment.items():
-            stat = "✓" if p >= 0 else "✗"
-            pg = f"Pagina {p}" if p >= 0 else "ERRORE"
-            print(f"  {stat} Arco {edges[e]} -> {pg}")
-        print("-" * 40)
-
-        if crossings == 0 and violated == 0:
-            print("\n🎉🎉🎉  SUCCESSO! 0 INCROCI  🎉🎉🎉")
-        else:
-            print(f"\n⚠️  Risultato parziale. Incroci: {crossings}, Violazioni: {violated}")
-
-        # Mostra SEMPRE il grafico finale (anche con errori)
-        print("[INFO] Visualizzo il risultato finale...")
-        #draw_book_embedding(nodes, edges, node_order, assignment)
-    except Exception as ex:
-        print(f"\n❌ Errore nella decodifica finale: {ex}")
+    a1 = decode_solution(bitstring, num_edges)
+    a2 = decode_solution(bitstring[::-1], num_edges)
+    if count_violations(a2) < count_violations(a1):
+        return a2
+    return a1
 
 
-# ─────────────────────────────────────────────────────────────────
-#  LR Scheduler
-# ─────────────────────────────────────────────────────────────────
-def get_scheduled_lr(initial_lr, step):
+def optimize_qaoa(
+    model: CostModel,
+    layers: int,
+    steps: int,
+    shots: int,
+    seed: int,
+) -> Tuple[np.ndarray, np.ndarray, float, float]:
     """
-    Exponential decay: lr = initial_lr * (decay_rate ^ (step // decay_every))
-    Con floor a LR_MIN.
+    Optimize QAOA parameters via a derivative-free method (COBYLA).
+    Returns (best_gammas, best_betas, best_energy, optimize_time_s).
     """
-    exponent = step // config.LR_DECAY_EVERY
-    lr = initial_lr * (config.LR_DECAY_RATE ** exponent)
-    return max(lr, config.LR_MIN)
+    from scipy.optimize import minimize
+
+    rng = np.random.default_rng(seed)
+    x0 = rng.uniform(-float(config.INIT_SCALE), float(config.INIT_SCALE), size=(2 * layers,))
+
+    eval_counter = {"i": 0}
+
+    def objective(x: np.ndarray) -> float:
+        eval_counter["i"] += 1
+        gammas = np.array(x[:layers], dtype=float)
+        betas = np.array(x[layers:], dtype=float)
+        # Keep sampling deterministic enough for optimizer by fixing seed per-eval.
+        counts = sample_qaoa_counts(model, gammas, betas, shots=shots, seed=seed + eval_counter["i"])
+        return estimate_energy_from_counts(model, counts)
+
+    t0 = perf_counter()
+    res = minimize(
+        objective,
+        x0,
+        method="COBYLA",
+        options={"maxiter": int(steps)},
+    )
+    dt = perf_counter() - t0
+
+    x_best = np.array(res.x, dtype=float)
+    gammas_best = x_best[:layers].copy()
+    betas_best = x_best[layers:].copy()
+
+    # Re-evaluate with the final parameters (fresh seed) for reporting.
+    counts_final = sample_qaoa_counts(model, gammas_best, betas_best, shots=shots, seed=seed + 99991)
+    energy_final = estimate_energy_from_counts(model, counts_final)
+
+    return gammas_best, betas_best, float(energy_final), float(dt)
 
 
-# ─────────────────────────────────────────────────────────────────
-#  Plateau Detection & Recovery
-# ─────────────────────────────────────────────────────────────────
-def detect_plateau(energy_window):
-    if len(energy_window) < config.PLATEAU_WINDOW:
-        return False
-    arr = standard_np.array(energy_window[-config.PLATEAU_WINDOW:])
-    span = float(arr.max() - arr.min())
-    mean_abs = float(abs(arr.mean()))
-    if mean_abs < 1e-12:
-        return True
-    return (span / mean_abs) < config.PLATEAU_THRESHOLD
-
-
-def apply_recovery(best_params_raw, plateau_count, current_lr):
-    """
-    Applica la strategia di recovery.
-    best_params_raw: array numpy PURO (non autograd).
-    Restituisce (new_params_grad, new_optimizer, strategy_name).
-    """
-    strategies = [
-        "LR Decay (÷2)",
-        "Parameter Perturbation (σ=0.1)",
-        "Partial Random Restart (50%)",
-    ]
-    idx = min(plateau_count - 1, len(strategies) - 1)
-    strategy = strategies[idx]
-
-    if idx == 0:
-        new_lr = current_lr * 0.5
-        new_optimizer = qml.AdamOptimizer(stepsize=new_lr)
-        new_params = _to_grad_params(best_params_raw)
-        print(f"        → LR: {current_lr:.5f} → {new_lr:.5f}")
-        return new_params, new_optimizer, strategy
-
-    elif idx == 1:
-        noise = standard_np.random.normal(0, 0.1, size=best_params_raw.shape)
-        new_raw = best_params_raw + noise
-        new_optimizer = qml.AdamOptimizer(stepsize=current_lr)
-        new_params = _to_grad_params(new_raw)
-        return new_params, new_optimizer, strategy
-
-    else:
-        mask = standard_np.random.random(best_params_raw.shape) > 0.5
-        random_vals = standard_np.random.uniform(0, 2 * standard_np.pi, size=best_params_raw.shape)
-        mixed = standard_np.where(mask, random_vals, best_params_raw)
-        new_optimizer = qml.AdamOptimizer(stepsize=config.LEARNING_RATE * 0.5)
-        new_params = _to_grad_params(mixed)
-        return new_params, new_optimizer, strategy
-
-
-# ─────────────────────────────────────────────────────────────────
-#  Main
-# ─────────────────────────────────────────────────────────────────
 def main():
-    print("\n" + "="*60)
-    print("   QAOA SOLVER — Fixed Order Book Embedding")
-    print("   (Gradient Clipping + LR Scheduler + Crash Recovery)")
-    print("="*60)
-
-    signal.signal(signal.SIGINT, _signal_handler)
+    print("\n" + "=" * 60)
+    print("QAOA Solver — Fixed-Order Book Embedding (pytket + weighted crossings)")
+    print("=" * 60)
 
     nodes, edges, node_order = get_graph()
-    crossing_pairs = precompute_crossings(edges, node_order)
+    num_edges = len(edges)
+    n_qubits = num_edges * int(config.NUM_PAGES)
 
-    # ─── VISUALIZZAZIONE INIZIALE ───
-    print("\n[INFO] Visualizzo il grafo iniziale...")
-    print("       (Tutti gli archi su Pagina 0 per evidenziare gli incroci)")
-    print("       >>> CHIUDI LA FINESTRA DEL GRAFICO PER CONTINUARE <<<")
+    if n_qubits > int(config.MAX_QUBITS):
+        raise ValueError(
+            f"Too many qubits: {n_qubits} > MAX_QUBITS={config.MAX_QUBITS}. "
+            f"Reduce NUM_EDGES or NUM_PAGES."
+        )
 
-    initial_assignment = {i: 0 for i in range(len(edges))}
-    #_book_embedding(nodes, edges, node_order, initial_assignment)
+    edge_weights = assign_edge_weights(edges, seed=config.SEED)
+    weighted_crossings = precompute_crossings(edges, node_order, edge_weights=edge_weights)
 
-    # ─── QAOA SETUP ───
-    H, n_qubits = build_hamiltonian(edges, crossing_pairs)
-    cost_fn, prob_fn = create_circuit(H, n_qubits, config.LAYERS)
-    grad_fn = qml.grad(cost_fn)  # funzione gradiente pre-compilata
+    print(f"[INFO] Edges: {num_edges}, Pages: {config.NUM_PAGES}, Qubits: {n_qubits}")
+    print(f"[INFO] Weighted crossings |C| = {len(weighted_crossings)}")
 
-    # Popola recovery state
-    _recovery_state["edges"] = edges
-    _recovery_state["crossing_pairs"] = crossing_pairs
-    _recovery_state["nodes"] = nodes
-    _recovery_state["node_order"] = node_order
-    _recovery_state["n_qubits"] = n_qubits
-    _recovery_state["prob_fn"] = prob_fn
+    # --- Classical baseline (CP-SAT) ---
+    classical = solve_book_embedding_cpsat(
+        num_edges=num_edges,
+        num_pages=int(config.NUM_PAGES),
+        weighted_crossings=weighted_crossings,
+        time_limit_s=10.0,
+        num_workers=8,
+    )
+    print(f"[CLASSICAL] status={classical.status} cost={classical.weighted_cost:.4f} time={classical.solve_time_s:.3f}s")
 
-    print(f"\n[FASE 5] INIZIO OTTIMIZZAZIONE")
-    print(f"  Qubit={n_qubits}, Layers={config.LAYERS}, LR={config.LEARNING_RATE}")
-    print(f"  Grad Clip={config.GRAD_CLIP}, LR Decay={config.LR_DECAY_RATE} ogni {config.LR_DECAY_EVERY} step")
+    # --- QAOA model ---
+    model = build_cost_model(edges, weighted_crossings)
 
-    np.random.seed(config.SEED)
-    # Inizializzazione quasi-adiabatica: angoli piccoli vicini a 0
-    # Simula evoluzione lenta che evita minimi locali di violazione totale
-    params = np.array(
-        np.random.uniform(-config.INIT_SCALE, config.INIT_SCALE, (2, config.LAYERS)),
-        requires_grad=True
+    def run_one(layers: int):
+        gammas, betas, best_energy, opt_time = optimize_qaoa(
+            model=model,
+            layers=layers,
+            steps=int(config.STEPS),
+            shots=5000,
+            seed=int(config.SEED),
+        )
+
+        counts = sample_qaoa_counts(model, gammas, betas, shots=20000, seed=int(config.SEED) + 424242)
+        bs = most_probable_bitstring(counts)
+        assignment = best_decode_with_optional_reverse(bs, num_edges=num_edges)
+        q_cost = weighted_crossing_cost(assignment, weighted_crossings)
+        violations = count_violations(assignment)
+
+        return {
+            "layers": int(layers),
+            "best_energy": float(best_energy),
+            "gammas": gammas.tolist(),
+            "betas": betas.tolist(),
+            "bitstring": bs,
+            "assignment": assignment,
+            "weighted_cost": float(q_cost),
+            "violations": int(violations),
+            "optimize_time_s": float(opt_time),
+        }
+
+    results = []
+    if bool(config.LAYER_SWEEP):
+        for l in range(1, int(config.LAYERS) + 1):
+            print(f"[QAOA] Optimizing layers={l} ...")
+            results.append(run_one(l))
+    else:
+        print(f"[QAOA] Optimizing layers={config.LAYERS} ...")
+        results.append(run_one(int(config.LAYERS)))
+
+    # Pick best by weighted cost among valid solutions, else by energy.
+    valid = [r for r in results if r["violations"] == 0]
+    if valid:
+        best = min(valid, key=lambda r: r["weighted_cost"])
+    else:
+        best = min(results, key=lambda r: r["best_energy"])
+
+    gap = best["weighted_cost"] - classical.weighted_cost
+    print(
+        f"[QAOA] best_layers={best['layers']} cost={best['weighted_cost']:.4f} "
+        f"violations={best['violations']} gap_vs_classical={gap:.4f}"
     )
 
-    current_lr = config.LEARNING_RATE
-    optimizer = qml.AdamOptimizer(stepsize=current_lr)
+    # --- Visualization ---
+    print("[INFO] Visualize classical assignment...")
+    draw_book_embedding(nodes, edges, node_order, classical.assignment)
+    print("[INFO] Visualize QAOA assignment...")
+    draw_book_embedding(nodes, edges, node_order, best["assignment"])
 
-    best_energy = float('inf')
-    best_params_raw = _detach_params(params)  # numpy puro
-    energy_window = []
-    plateau_count = 0
-    divergence_cooldown = 0
-
-    start_time = time.time()
-
-    # ─── OPTIMIZATION LOOP ───
+    # --- Save results (implemented in results_io.py) ---
     try:
-        for step in range(config.STEPS):
-            if _recovery_state["interrupted"]:
-                print("\n  🛑 Interruzione rilevata — esco dal loop.")
-                break
+        from results_io import save_run_json
 
-            # ── 1. Calcola energia e gradiente separatamente ──
-            energy = float(cost_fn(params))
-            grad = grad_fn(params)
+        payload = {
+            "config": {
+                "USE_PLANAR_DEMO": bool(config.USE_PLANAR_DEMO),
+                "NUM_PAGES": int(config.NUM_PAGES),
+                "MAX_QUBITS": int(config.MAX_QUBITS),
+                "WEIGHT_LOW": float(config.WEIGHT_LOW),
+                "WEIGHT_HIGH": float(config.WEIGHT_HIGH),
+                "ALPHA": float(config.ALPHA),
+                "BETA": float(config.BETA),
+                "LAYERS": int(config.LAYERS),
+                "LAYER_SWEEP": bool(config.LAYER_SWEEP),
+                "STEPS": int(config.STEPS),
+                "SEED": int(config.SEED),
+            },
+            "graph": {
+                "nodes": nodes,
+                "edges": edges,
+                "node_order": node_order,
+                "edge_weights": {int(k): float(v) for k, v in edge_weights.items()},
+            },
+            "crossings": [[int(e), int(f), float(w)] for (e, f, w) in weighted_crossings],
+            "n_qubits": int(n_qubits),
+            "classical": asdict(classical),
+            "qaoa": {
+                "best": best,
+                "all_runs": results,
+                "gap_vs_classical": float(gap),
+            },
+        }
 
-            # ── 2. Gradient Clipping (per-component) ──
-            grad_clipped = np.clip(grad, -config.GRAD_CLIP, config.GRAD_CLIP)
-
-            # ── 3. LR Scheduler: aggiorna LR con exponential decay ──
-            scheduled_lr = get_scheduled_lr(config.LEARNING_RATE, step)
-            if abs(optimizer.stepsize - scheduled_lr) > 1e-8:
-                optimizer = qml.AdamOptimizer(stepsize=scheduled_lr)
-                current_lr = scheduled_lr
-
-            # ── 4. Applica gradiente clippato via Adam ──
-            params, = optimizer.apply_grad([grad_clipped], [params])
-
-            e_val = energy
-            energy_window.append(e_val)
-
-            # ── 5. Aggiorna best (numpy puro, NO autograd) ──
-            if e_val < best_energy:
-                best_energy = e_val
-                best_params_raw = _detach_params(params)
-                _recovery_state["best_params"] = best_params_raw.copy()
-                _recovery_state["best_energy"] = best_energy
-                marker = " *"
-            else:
-                marker = ""
-
-            # ── 6. Divergence guard (con cooldown) ──
-            if divergence_cooldown > 0:
-                divergence_cooldown -= 1
-            elif e_val > best_energy + config.DIVERGENCE_DELTA:
-                print(f"\n  🔥 DIVERGENZA al passo {step} "
-                      f"(E={e_val:.4f} >> Best={best_energy:.4f})")
-                new_lr = current_lr * 0.5
-                print(f"     → Ripristino best_params, LR: {current_lr:.5f} → {new_lr:.5f}")
-                params = _to_grad_params(best_params_raw)
-                optimizer = qml.AdamOptimizer(stepsize=new_lr)
-                current_lr = new_lr
-                energy_window.clear()
-                divergence_cooldown = config.DIVERGENCE_COOLDOWN
-                continue
-
-            # ── 7. Plateau Detection ──
-            if detect_plateau(energy_window):
-                plateau_count += 1
-                if plateau_count > config.MAX_PLATEAU_HITS:
-                    print(f"\n  ⏹️  MAX PLATEAU HITS ({config.MAX_PLATEAU_HITS}). Early stop.")
-                    break
-
-                print(f"\n  ⚠️  PLATEAU al passo {step} "
-                      f"(hit #{plateau_count}/{config.MAX_PLATEAU_HITS})")
-                params, optimizer, strat = apply_recovery(
-                    best_params_raw, plateau_count, current_lr)
-                current_lr = optimizer.stepsize
-                divergence_cooldown = config.DIVERGENCE_COOLDOWN
-                print(f"     → Strategia: {strat}")
-                energy_window.clear()
-
-            # ── Log ──
-            if step % 10 == 0 or step == config.STEPS - 1:
-                elapsed = time.time() - start_time
-                print(f"  Step {step:3d} | E: {e_val:8.4f} | Best: {best_energy:8.4f} "
-                      f"| LR: {current_lr:.5f}{marker}  [{elapsed:.1f}s]")
-
+        out_path = save_run_json(payload)
+        print(f"[RESULTS] Saved: {out_path}")
     except Exception as ex:
-        print(f"\n\n💥 CRASH: {ex}")
-        print("   Salvataggio e decodifica con i migliori parametri trovati...")
-        save_checkpoint()
-
-    # ─── RISULTATI FINALI (sempre eseguiti) ───
-    elapsed = time.time() - start_time
-    print(f"\n[INFO] Terminato in {elapsed:.1f}s")
-    print(f"[INFO] Best Energy: {best_energy:.4f}")
-    print(f"[INFO] Plateau recovery: {plateau_count}")
-
-    save_checkpoint()
-    finalize_results()
+        print(f"[RESULTS] Skipped saving (results_io.py not ready): {ex}")
 
 
 if __name__ == "__main__":
     main()
+
