@@ -189,8 +189,15 @@ def build_qaoa_circuit(
     model: CostModel,
     gammas: np.ndarray,
     betas: np.ndarray,
+    measure: bool = True,
+    prepare_uniform: bool = True,
 ) -> "Circuit":
-    """Build a numeric QAOA circuit using pytket and explicit measurements."""
+    """Build a numeric QAOA circuit using pytket.
+
+    ``gammas`` and ``betas`` are mathematical angles in radians.  pytket
+    rotation parameters are expressed in half-turns, so conversion to pytket's
+    convention happens only at the gate boundary below.
+    """
     from pytket.circuit import Circuit
 
     n = model.n_qubits
@@ -201,23 +208,28 @@ def build_qaoa_circuit(
     # Circuit(n) has no classical register in current pytket; measurements
     # require the explicit one-to-one n-qubit/n-bit circuit.
     circ = Circuit(n, n)
-    for q in range(n):
-        circ.H(q)
+    if prepare_uniform:
+        for q in range(n):
+            circ.H(q)
 
     for layer in range(p):
         g = float(gammas[layer])
         b = float(betas[layer])
         for i, coeff in model.z_terms.items():
-            circ.Rz(2.0 * g * float(coeff), int(i))
+            # Rz(t) = exp(-i*pi*t*Z/2), with t in half-turns.
+            circ.Rz(2.0 * g * float(coeff) / np.pi, int(i))
         for (i, j), coeff in model.zz_terms.items():
             circ.CX(int(i), int(j))
-            circ.Rz(2.0 * g * float(coeff), int(j))
+            # The CX-Rz-CX gadget therefore implements exp(-i*g*c*ZiZj).
+            circ.Rz(2.0 * g * float(coeff) / np.pi, int(j))
             circ.CX(int(i), int(j))
         for q in range(n):
-            circ.Rx(2.0 * b, q)
+            # Rx(t) = exp(-i*pi*t*X/2), again using half-turns.
+            circ.Rx(2.0 * b / np.pi, q)
 
-    for q in range(n):
-        circ.Measure(q, q)
+    if measure:
+        for q in range(n):
+            circ.Measure(q, q)
     return circ
 
 

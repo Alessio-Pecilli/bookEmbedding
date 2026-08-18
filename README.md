@@ -13,6 +13,10 @@ For the current pytket Aer adapter, `Result.get_counts()` is empirically a tuple
 inside that conversion function. Energy estimation, decoding, metrics, and
 tests consume only the canonical `q0, q1, ...` string.
 
+QAOA `gammas` and `betas` are mathematical angles in radians. pytket's `Rz`
+and `Rx` parameters use half-turns (multiples of π), so the conversion
+`2 * angle * coefficient / π` happens only inside `build_qaoa_circuit()`.
+
 The one-hot Hamiltonian uses
 
 ```text
