@@ -4,7 +4,6 @@
 =============================================================================
 """
 import matplotlib.pyplot as plt
-import matplotlib.cm as cm
 import numpy as np
 import config
 
@@ -21,14 +20,16 @@ def draw_book_embedding(nodes, edges, node_order, assignment):
 
     Colori generati automaticamente da una colormap.
     """
-    k = config.NUM_PAGES
+    k = int(config.NUM_PAGES)
+    if k < 1:
+        raise ValueError("NUM_PAGES must be positive")
     fig, ax = plt.subplots(figsize=(12, 7))
 
     # ── Colori distinti per ogni pagina ──
     if k <= 10:
-        cmap = cm.get_cmap("tab10", k)
+        cmap = plt.colormaps.get_cmap("tab10").resampled(k)
     else:
-        cmap = cm.get_cmap("hsv", k)
+        cmap = plt.colormaps.get_cmap("hsv").resampled(k)
     page_colors = [cmap(i) for i in range(k)]
 
     # ── Posizione dei nodi sulla spina ──
@@ -48,7 +49,7 @@ def draw_book_embedding(nodes, edges, node_order, assignment):
 
     # ── Disegna gli archi ──
     for e_idx, page in assignment.items():
-        if page == -1:
+        if page == -1 or not 0 <= int(page) < k:
             continue
 
         u, v = edges[e_idx]

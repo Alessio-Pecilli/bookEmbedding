@@ -15,7 +15,7 @@ Questo modulo contiene la logica CLASSICA del problema:
      a ordine fisso.  Solo queste coppie "pericolose" generano penalità
      nell'Hamiltoniana quantistica.
 
-Nessuna dipendenza da PennyLane: tutto è NumPy / Python puro.
+Nessuna dipendenza da un framework quantistico: il pre-processing è Python puro.
 =============================================================================
 """
 
@@ -91,14 +91,14 @@ def get_graph():
         # Genera un grafo casuale con parametri da config.py.
         # L'ordine dei nodi è semplicemente 0, 1, ..., N-1.
         # ────────────────────────────────────────────────────────────────
-        random.seed(config.SEED)
+        rng = random.Random(config.SEED)
         nodes = list(range(config.NUM_NODES))
         node_order = list(nodes)   # ordine naturale sulla spina
 
         # Genera tutti i possibili archi e ne estrae NUM_EDGES a caso
         all_possible = [(i, j) for i in nodes for j in nodes if i < j]
         num_to_pick = min(config.NUM_EDGES, len(all_possible))
-        edges = sorted(random.sample(all_possible, num_to_pick))
+        edges = sorted(rng.sample(all_possible, num_to_pick))
 
         print("=" * 60)
         print("[GRAPH] Modalità: RANDOM")
@@ -190,79 +190,3 @@ def precompute_crossings(edges, node_order, edge_weights=None):
     print("=" * 60)
 
     return crossing_pairs
-
-import matplotlib.pyplot as plt
-import numpy as np
-
-def draw_book_embedding(nodes, edges, node_order, assignment):
-    """
-    Disegna il grafo in stile 'Book Embedding'.
-    - Nodi sulla linea orizzontale (Spina).
-    - Pagina 0: Archi sopra (Blu).
-    - Pagina 1: Archi sotto (Rosso).
-    """
-    plt.figure(figsize=(10, 6))
-    
-    # 1. Mappiamo i nodi alle coordinate X in base all'ordine
-    # node_order = [0, 1, 2, 3] -> x=0, x=1, x=2, x=3
-    pos = {node: i for i, node in enumerate(node_order)}
-    
-    # 2. Disegniamo la Spina (Linea nera)
-    plt.axhline(y=0, color='black', linestyle='-', linewidth=2, alpha=0.3)
-    
-    # 3. Disegniamo i Nodi
-    x_vals = [pos[n] for n in nodes]
-    y_vals = [0] * len(nodes)
-    plt.scatter(x_vals, y_vals, s=200, color='black', zorder=5)
-    
-    # Etichette dei nodi
-    for n in nodes:
-        plt.text(pos[n], -0.1, str(n), ha='center', va='top', fontsize=12, fontweight='bold')
-
-    # 4. Disegniamo gli Archi come Semicerchi
-    for e_idx, page in assignment.items():
-        if page == -1: continue # Salta archi invalidi
-        
-        u, v = edges[e_idx]
-        x_u, x_v = pos[u], pos[v]
-        
-        # Calcoli per il semicerchio
-        center = (x_u + x_v) / 2
-        radius = abs(x_v - x_u) / 2
-        
-        # Generiamo i punti dell'arco
-        theta = np.linspace(0, np.pi, 100)
-        x_arc = center + radius * np.cos(theta)
-        y_arc = radius * np.sin(theta)
-        
-        # Se è Pagina 1, ribaltiamo l'arco sotto (y negativi)
-        color = 'blue'
-        label = "Pagina 0"
-        if page == 1:
-            y_arc = -y_arc
-            color = 'red'
-            label = "Pagina 1"
-        
-        # Disegno arco
-        plt.plot(x_arc, y_arc, color=color, linewidth=2, alpha=0.7)
-        
-        # Aggiungiamo etichetta a metà arco per capire che arco è
-        mid_idx = 50
-        plt.text(x_arc[mid_idx], y_arc[mid_idx], f"e{e_idx}", 
-                 color=color, fontsize=9, ha='center', va='center', 
-                 bbox=dict(facecolor='white', edgecolor='none', alpha=0.7, pad=1))
-
-    # Decorazioni
-    plt.title("Visualizzazione Book Embedding (QAOA Result)", fontsize=14)
-    plt.yticks([]) # Nascondi asse Y
-    plt.xlabel("Ordine dei Nodi sulla Spina")
-    
-    # Legend trick
-    plt.plot([], [], color='blue', label='Pagina 0 (Sopra)')
-    plt.plot([], [], color='red', label='Pagina 1 (Sotto)')
-    plt.legend()
-    
-    plt.grid(False)
-    plt.box(False)
-    plt.tight_layout()
-    plt.show()

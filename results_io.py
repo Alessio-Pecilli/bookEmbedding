@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import csv
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
@@ -42,15 +43,14 @@ def save_run_json(payload: Dict[str, Any], filename: str | None = None) -> str:
 def append_summary_csv(
     row: Dict[str, Any],
     filename: str = "summary.csv",
+    base_dir: Optional[str] = None,
 ) -> str:
     """
     Append a flat dict row to results/summary.csv.
     Creates the file (with header) if missing.
     Returns absolute path.
     """
-    import csv
-
-    out_dir = _ensure_results_dir()
+    out_dir = _ensure_results_dir(base_dir)
     path = os.path.join(out_dir, filename)
     abs_path = os.path.abspath(path)
 
@@ -62,12 +62,25 @@ def append_summary_csv(
         else:
             flat[k] = "" if v is None else str(v)
 
-    exists = os.path.exists(path)
-    with open(path, "a", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=list(flat.keys()))
-        if not exists:
+    if not os.path.exists(path):
+        with open(path, "w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=list(flat.keys()))
             writer.writeheader()
-        writer.writerow(flat)
+            writer.writerow(flat)
+        return abs_path
+
+    # Keep a valid rectangular CSV when later runs add metrics.  The previous
+    # implementation wrote a new header schema only implicitly, corrupting the
+    # column alignment for consumers of the summary file.
+    with open(path, "r", encoding="utf-8", newline="") as f:
+        reader = csv.DictReader(f)
+        old_fieldnames = list(reader.fieldnames or [])
+        rows = list(reader)
+    fieldnames = old_fieldnames + [key for key in flat if key not in old_fieldnames]
+    rows.append(flat)
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
 
     return abs_path
-

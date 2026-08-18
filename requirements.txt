@@ -4,3 +4,4 @@ scipy
 ortools
 pytket>=1.30
 pytket-qiskit>=0.50
+pytest>=8
