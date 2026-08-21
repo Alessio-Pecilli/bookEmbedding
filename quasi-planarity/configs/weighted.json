@@ -1,0 +1,17 @@
+{
+  "problem_type": "weighted",
+  "max_vertices": 20,
+  "n_min": 10,
+  "step": 2,
+  "n_seeds_per_size": 1,
+  "base_seed": 42,
+  "p_max": 3,
+  "penalty": null,
+  "approx_ratio_threshold": 0.99,
+  "n_restarts": 3,
+  "n_shots": 1024,
+  "weight_low": 1,
+  "weight_high": 10,
+  "qaoa_backend": "aer_statevector",
+  "qaoa_device": "CPU"
+}

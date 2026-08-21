@@ -1,0 +1,31 @@
+[project]
+name = "tvd-qaoa"
+version = "0.1.0"
+description = "QAOA pipeline for Triangle Vertex Deletion (weighted & unweighted), benchmarked against classical solvers."
+requires-python = ">=3.11"
+dependencies = [
+    "networkx==3.6.1",
+    "pytket==2.18.1",
+    "pytket-qiskit==0.77.0",
+    "numpy>=1.26,<2.4",
+    "scipy==1.17.0",
+    "pulp==3.3.2",
+    "dimod==0.12.22",
+    "pandas==3.0.2",
+    "matplotlib==3.10.8",
+    "pytest>=8.0",
+]
+
+[project.optional-dependencies]
+gurobi = ["gurobipy"]
+cplex = ["docplex"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["tvd_qaoa*"]

@@ -1,0 +1,18 @@
+{
+  "problem_type": "unweighted",
+  "max_vertices": 40,
+  "n_min": 20,
+  "step": 4,
+  "n_seeds_per_size": 1,
+  "base_seed": 42,
+  "p_max": 3,
+  "penalty": null,
+  "approx_ratio_threshold": 0.99,
+  "n_restarts": 3,
+  "n_shots": 2048,
+  "n_shots_optimization": 256,
+  "qaoa_backend": "aer_mps",
+  "qaoa_device": "CPU",
+  "qaoa_mps_max_bond_dimension": 64,
+  "qaoa_mps_truncation_threshold": 1e-8
+}
