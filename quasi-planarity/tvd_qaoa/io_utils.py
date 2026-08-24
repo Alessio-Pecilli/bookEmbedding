@@ -79,9 +79,12 @@ RESULTS_COLUMNS = [
     "ilp_optimal_value",
     "ilp_solver_backend",
     "qubo_optimal_value",
-    "qaoa_value",
+    "p",
+    "is_optimal_p",
     "optimal_p",
-    "approx_ratio_at_optimal_p",
+    "expected_cost",
+    "qaoa_value",
+    "approx_ratio",
     "threshold_met",
     "prune_wall_clock_seconds",
     "build_pubo_wall_clock_seconds",
@@ -90,14 +93,18 @@ RESULTS_COLUMNS = [
     "heuristic_wall_clock_seconds",
     "ilp_wall_clock_seconds",
     "qubo_wall_clock_seconds",
+    "qaoa_layer_wall_clock_seconds",
     "qaoa_wall_clock_seconds",
     "total_wall_clock_seconds",
 ]
 
 
-def append_result_row(row: dict, csv_path: Path = RESULTS_DIR / "results.csv") -> None:
+def append_result_row(row: dict | list[dict], csv_path: Path = RESULTS_DIR / "results.csv") -> None:
+    """Append one or more result rows (one row per (instance, p) -- see
+    RESULTS_COLUMNS) to the results CSV."""
     csv_path.parent.mkdir(parents=True, exist_ok=True)
-    df_row = pd.DataFrame([{c: row.get(c) for c in RESULTS_COLUMNS}])
+    rows = row if isinstance(row, list) else [row]
+    df_row = pd.DataFrame([{c: r.get(c) for c in RESULTS_COLUMNS} for r in rows])
     if csv_path.exists():
         existing_header = pd.read_csv(csv_path, nrows=0).columns.tolist()
         if existing_header != RESULTS_COLUMNS:

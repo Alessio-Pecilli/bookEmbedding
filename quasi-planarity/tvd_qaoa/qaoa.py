@@ -213,20 +213,23 @@ def best_sampled_cost(
     probs: dict[tuple[int, ...], float],
     n_shots: int,
     rng: np.random.Generator,
-) -> float:
+) -> tuple[float, tuple[int, ...]]:
     """Sample n_shots bitstrings from an exact probability distribution and
-    return the minimum PUBO cost observed (the "best-sampled" objective)."""
+    return (minimum PUBO cost observed, the bitstring that achieved it) --
+    the "best-sampled" objective and its solution."""
     outcomes = list(probs.keys())
     weights = np.array([probs[o] for o in outcomes])
     weights = weights / weights.sum()
     draws = rng.choice(len(outcomes), size=n_shots, p=weights)
     best = math.inf
+    best_bits: tuple[int, ...] = ()
     for idx in np.unique(draws):
         bits = outcomes[idx]
         assignment = {v: bits[v] for v in range(len(bits))}
         cost = evaluate_pubo(pubo, assignment)
-        best = min(best, cost)
-    return best
+        if cost < best:
+            best, best_bits = cost, bits
+    return best, best_bits
 
 
 def _evaluate_circuit(
@@ -236,17 +239,17 @@ def _evaluate_circuit(
     backend_config: BackendConfig,
     n_shots: int,
     rng: np.random.Generator,
-) -> tuple[float, float]:
-    """Returns (expected_cost, best_sampled_cost) for one circuit under the
-    given backend. Exact backend: computed from the full probability
-    distribution. Shot backends (aer/aer_mps, CPU or GPU, incl. tensor
-    network): both quantities are empirical, estimated from `n_shots`
+) -> tuple[float, float, tuple[int, ...]]:
+    """Returns (expected_cost, best_sampled_cost, best_sampled_bits) for one
+    circuit under the given backend. Exact backend: computed from the full
+    probability distribution. Shot backends (aer/aer_mps, CPU or GPU, incl.
+    tensor network): all quantities are empirical, estimated from `n_shots`
     measurement outcomes actually drawn on that backend."""
     if backend_config.exact:
         probs = _bitstring_probabilities(circ, backend)
         expected = expected_pubo_cost(pubo, probs)
-        best = best_sampled_cost(pubo, probs, n_shots, rng)
-        return expected, best
+        best, best_bits = best_sampled_cost(pubo, probs, n_shots, rng)
+        return expected, best, best_bits
 
     measured = circ.copy()
     measured.measure_all()
@@ -256,12 +259,14 @@ def _evaluate_circuit(
     total_shots = sum(counts.values())
     expected = 0.0
     best = math.inf
+    best_bits: tuple[int, ...] = ()
     for bits, count in counts.items():
         assignment = {v: bits[v] for v in range(len(bits))}
         cost = evaluate_pubo(pubo, assignment)
         expected += (count / total_shots) * cost
-        best = min(best, cost)
-    return expected, best
+        if cost < best:
+            best, best_bits = cost, bits
+    return expected, best, best_bits
 
 
 # ---------------------------------------------------------------------------
@@ -276,6 +281,7 @@ class QAOALayerResult:
     gammas: list[float]
     expected_cost: float
     best_sampled_objective: float
+    best_sampled_vertices: list[int]
     approx_ratio: float
     wall_clock_seconds: float = 0.0
 
@@ -315,7 +321,7 @@ def optimize_qaoa_angles(
     def objective(x: np.ndarray) -> float:
         betas, gammas = list(x[:p]), list(x[p:])
         circ = build_qaoa_circuit(pubo, n_qubits, p, betas, gammas)
-        expected, _ = _evaluate_circuit(circ, pubo, backend, backend_config, opt_shots, rng)
+        expected, _, _ = _evaluate_circuit(circ, pubo, backend, backend_config, opt_shots, rng)
         return expected
 
     best_result = None
@@ -333,7 +339,8 @@ def optimize_qaoa_angles(
 
     betas, gammas = list(best_result.x[:p]), list(best_result.x[p:])
     circ = build_qaoa_circuit(pubo, n_qubits, p, betas, gammas)
-    _, best_obj = _evaluate_circuit(circ, pubo, backend, backend_config, n_shots, rng)
+    _, best_obj, best_bits = _evaluate_circuit(circ, pubo, backend, backend_config, n_shots, rng)
+    best_vertices = [v for v, bit in enumerate(best_bits) if bit == 1]
     ratio = 1.0 if classical_optimal == 0 else classical_optimal / best_obj if best_obj > 0 else 1.0
     wall_clock = time.perf_counter() - layer_start
     logger.info(
@@ -347,6 +354,7 @@ def optimize_qaoa_angles(
         gammas=gammas,
         expected_cost=float(best_result.fun),
         best_sampled_objective=best_obj,
+        best_sampled_vertices=best_vertices,
         approx_ratio=ratio,
         wall_clock_seconds=wall_clock,
     )
@@ -364,6 +372,7 @@ class QAOASweepResult:
     optimal_gammas: list[float]
     approx_ratio_at_optimal_p: float
     best_sampled_objective_at_optimal_p: float
+    best_sampled_vertices_at_optimal_p: list[int]
     threshold_met: bool
     sweep: list[QAOALayerResult] = field(default_factory=list)
 
@@ -423,6 +432,7 @@ def qaoa_p_sweep(
                 optimal_gammas=layer_result.gammas,
                 approx_ratio_at_optimal_p=layer_result.approx_ratio,
                 best_sampled_objective_at_optimal_p=layer_result.best_sampled_objective,
+                best_sampled_vertices_at_optimal_p=layer_result.best_sampled_vertices,
                 threshold_met=True,
                 sweep=sweep,
             )
@@ -438,6 +448,7 @@ def qaoa_p_sweep(
         optimal_gammas=best.gammas,
         approx_ratio_at_optimal_p=best.approx_ratio,
         best_sampled_objective_at_optimal_p=best.best_sampled_objective,
+        best_sampled_vertices_at_optimal_p=best.best_sampled_vertices,
         threshold_met=False,
         sweep=sweep,
     )

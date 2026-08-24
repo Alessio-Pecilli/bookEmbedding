@@ -1,6 +1,6 @@
 {
   "problem_type": "weighted",
-  "max_vertices": 20,
+  "max_vertices": 15,
   "n_min": 10,
   "step": 2,
   "n_seeds_per_size": 1,

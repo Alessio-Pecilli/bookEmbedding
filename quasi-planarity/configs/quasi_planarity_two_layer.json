@@ -1,8 +1,12 @@
 {
   "problem_type": "unweighted",
-  "max_vertices": 16,
-  "n_min": 10,
-  "step": 2,
+  "instance_source": "quasi_planarity",
+  "drawing": "two_layer",
+  "spine_min": 4,
+  "spine_max": 40,
+  "spine_step": 1,
+  "legs_low": 1,
+  "legs_high": 10,
   "n_seeds_per_size": 1,
   "base_seed": 42,
   "p_max": 3,
@@ -10,6 +14,7 @@
   "approx_ratio_threshold": 0.99,
   "n_restarts": 3,
   "n_shots": 1024,
+  "solve_mode": "classical",
   "qaoa_backend": "aer_statevector",
   "qaoa_device": "CPU"
 }

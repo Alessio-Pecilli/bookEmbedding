@@ -102,18 +102,82 @@ always saved.
 
 ```
 tvd_qaoa/
-  instances.py          # §3  reproducible instance generation + sweeps
+  instances.py          # §3  random-triangle-rich instance generation + sweeps
+  quasi_planarity.py     # §3b caterpillar -> 2-layer/1-page drawing -> crossing-graph reformulation
   formulation.py         # §4  build_pubo / build_qubo / build_ilp, pruning
   classical_solvers.py   # §5  greedy heuristic, exact ILP, exact QUBO
   qaoa.py                 # §6  pytket PUBO-QAOA circuit + p-sweep
   experiment.py           # §7  orchestration, CLI, config-driven
   io_utils.py             # save/load instances & results
   analysis.py             # qubits-vs-size table + plot
+  visualization.py        # per-instance original-vs-solution side-by-side plot
 tests/
   test_formulation_equivalence.py   # §4 cross-validation gate
 configs/
   unweighted.json / weighted.json   # the two variants, same code path
 ```
+
+## Instance sources (§3 / §3b)
+
+`ExperimentConfig.instance_source` selects how instances are generated:
+
+- **`"random_triangle_rich"`** (default) — the original §3 K3-cluster-stitched
+  random generator, sized by `n_min` / `max_vertices` / `step`.
+- **`"quasi_planarity"`** — TVD as a reformulation of restoring
+  **quasi-planarity** to a drawn graph: a drawing is 3-quasi-planar iff no 3
+  of its edges pairwise cross, so the minimum edge set whose removal
+  restores quasi-planarity is exactly a minimum hitting set over every
+  triple of pairwise-crossing edges. `quasi_planarity.py` builds this
+  end-to-end:
+  1. **Generate a random caterpillar** (a path spine + a random number of
+     pendant leaves per spine vertex, drawn from `[legs_low, legs_high]`).
+  2. **Draw it**, per `ExperimentConfig.drawing`:
+     - `"two_layer"` — vertices split across two layers by the
+       caterpillar's natural tree bipartition (so every edge always spans
+       the two layers), with an independent random left-to-right order
+       within each layer; two edges cross iff their layer-0/layer-1
+       endpoint order is reversed.
+     - `"one_page"` — a uniformly random spine order over all vertices;
+       two edges cross iff exactly one endpoint of one lies strictly
+       between the endpoints of the other (the standard book-embedding
+       crossing rule).
+  3. **Build the crossing graph**: one node per caterpillar edge, one link
+     per pair of caterpillar edges that cross under that drawing.
+  4. **Build the auxiliary TVD graph**: restrict the crossing graph to
+     nodes/edges that lie in >=1 triangle (a triangle in the crossing graph
+     is exactly a triple of pairwise-crossing edges) — this *is* the TVD
+     instance, fed unchanged into `formulation.py` / `classical_solvers.py`
+     / `qaoa.py`.
+
+  Sized by `spine_min` / `spine_max` / `spine_step` instead of
+  `n_min`/`max_vertices`/`step` (the caterpillar+legs generation determines
+  vertex count, so it isn't chosen directly). If a random drawing happens to
+  already be quasi-planar (no 3-pairwise-crossing edges at all), the
+  generator retries with a fresh drawing of the same caterpillar, up to 25
+  attempts, before raising.
+
+  Each saved instance's `generation_params` records the caterpillar
+  structure, the drawing (layer/position assignment), and
+  `aux_vertex_to_caterpillar_edge` (which original caterpillar edge each TVD
+  vertex corresponds to), so a result is traceable back to the drawing that
+  produced it.
+
+## Solve mode (§5 / §6 gating)
+
+`ExperimentConfig.solve_mode` controls which solver stages run per instance:
+
+- **`"both"`** (default) — original behavior: heuristic + exact ILP + exact
+  QUBO + the QAOA p-sweep.
+- **`"classical"`** — heuristic + exact ILP + exact QUBO only; the QAOA
+  p-sweep, its angle artifact, and the QAOA visualization panel are skipped
+  entirely (results rows have `optimal_p`/`qaoa_value`/`approx_ratio`/etc. as
+  empty).
+- **`"quantum"`** — the QAOA p-sweep only; the heuristic and exact-QUBO
+  baselines are skipped (`heuristic_value`/`qubo_optimal_value` empty in the
+  results row). The exact ILP still always runs regardless of `solve_mode`
+  — it is comparatively cheap and is the ground-truth `classical_optimal`
+  QAOA's approximation ratio is measured against, and what the
+  visualization's "best classical" panel shows.
 
 ## Running
 
@@ -127,8 +191,18 @@ python -m tvd_qaoa.analysis                   # qubits-vs-size table + plot
 
 Results land in `data/results/results.csv` (one row per instance, schema in
 `io_utils.RESULTS_COLUMNS`), per-instance angle/sweep artifacts in
-`data/angles/{problem_type}/{instance_id}.json`, and the qubits-vs-size table
-and plot in `data/results/analysis/`.
+`data/angles/{problem_type}/{instance_id}.json`, the qubits-vs-size table
+and plot in `data/results/analysis/`, and a side-by-side visualization of
+each instance's original graph and its exact-ILP TVD solution (selected
+vertices highlighted, same node layout on both panels) in
+`data/visualizations/{problem_type}/{instance_id}.png`.
+
+To (re)generate visualizations for instances already saved under
+`data/instances/` without rerunning the full pipeline:
+
+```bash
+python -m tvd_qaoa.visualization
+```
 
 `gurobipy`/`docplex` are optional; `classical_solvers.solve_ilp` tries them
 first and logs which backend actually ran (via `ilp_solver_backend` in the
